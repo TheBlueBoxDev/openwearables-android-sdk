@@ -19,4 +19,6 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "OpenWearablesHealthSDK"
+rootProject.name = "OpenWearablesHealth"
+include(":app")
+include(":OpenWearablesHealthSDK")
