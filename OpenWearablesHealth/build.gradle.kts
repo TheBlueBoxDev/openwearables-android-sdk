@@ -1,3 +1,5 @@
+import org.gradle.kotlin.dsl.implementation
+
 plugins {
     alias(libs.plugins.android.library)
     alias(libs.plugins.kotlin.android)
@@ -33,6 +35,14 @@ android {
     }
 }
 
+repositories {
+    google()
+    mavenCentral()
+    mavenLocal {
+        url = uri("${project.projectDir}/libs/maven")
+    }
+}
+
 dependencies {
     implementation(platform(libs.okhttp.bom))
     implementation(libs.okhttp)
@@ -40,10 +50,25 @@ dependencies {
     implementation(libs.retrofit)
     implementation(libs.retrofit.converter.gson)
 
+    implementation(libs.androidx.core.ktx)
+
+    implementation(libs.kotlin.serialization)
+    implementation(libs.kotlinx.serialization.json)
+
     implementation(libs.kotlinx.coroutines.core)
     implementation(libs.kotlinx.coroutines.android)
 
-    implementation(libs.connect.client)
+    implementation(libs.health.connect.client)
+//    implementation(libs.health.services.client)
+
+// Samsung Health Data SDK
+    implementation(libs.data)
+
+// WorkManager for background sync
+    implementation(libs.androidx.work.runtime.ktx)
+
+// Security for EncryptedSharedPreferences
+    implementation(libs.androidx.security.crypto)
 
     testImplementation(libs.junit)
 }
