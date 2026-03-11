@@ -6,25 +6,67 @@ import android.util.Log
 import androidx.core.content.edit
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import java.security.KeyStore
 
-class SecureStorageManager(context: Context) {
+class SecureStorage(val context: Context) {
+
+    /**
+     * Whether the encrypted storage initialized successfully.
+     * If false, credentials are NOT being stored securely.
+     */
+    var isEncryptionActive: Boolean = true
+        private set
 
     private val securePrefs: SharedPreferences by lazy {
         try {
-            val masterKey = MasterKey.Builder(context)
-                .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
-                .build()
-
-            EncryptedSharedPreferences.create(
-                context,
-                PREFS_NAME,
-                masterKey,
-                EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
-                EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
-            )
+            createEncryptedPrefs()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to create encrypted prefs, falling back to regular prefs", e)
+            Log.e(TAG, "Failed to create encrypted prefs, attempting recovery", e)
+            try {
+                clearCorruptedKeyStoreEntry()
+                createEncryptedPrefs()
+            } catch (retryException: Exception) {
+                Log.e(
+                    TAG, "Recovery failed — encrypted storage unavailable. " +
+                        "Sensitive data will NOT be stored.", retryException)
+                isEncryptionActive = false
+                throw IllegalStateException(
+                    "EncryptedSharedPreferences initialization failed after recovery attempt. " +
+                            "This may be a device-level KeyStore issue.", retryException
+                )
+            }
+        }
+    }
+
+    private fun createEncryptedPrefs(): SharedPreferences {
+        val masterKey = MasterKey.Builder(context)
+            .setKeyScheme(MasterKey.KeyScheme.AES256_GCM)
+            .build()
+
+        return EncryptedSharedPreferences.create(
+            context,
+            PREFS_NAME,
+            masterKey,
+            EncryptedSharedPreferences.PrefKeyEncryptionScheme.AES256_SIV,
+            EncryptedSharedPreferences.PrefValueEncryptionScheme.AES256_GCM
+        )
+    }
+
+    private fun clearCorruptedKeyStoreEntry() {
+        try {
+            val keyStore = KeyStore.getInstance("AndroidKeyStore")
+            keyStore.load(null)
+            keyStore.deleteEntry(MasterKey.DEFAULT_MASTER_KEY_ALIAS)
+            Log.d(TAG, "Cleared corrupted KeyStore entry")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to clear KeyStore entry", e)
+        }
+        try {
             context.getSharedPreferences(PREFS_NAME, Context.MODE_PRIVATE)
+                .edit { clear() }
+            Log.d(TAG, "Cleared corrupted shared prefs file")
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to clear shared prefs file", e)
         }
     }
 
@@ -136,7 +178,7 @@ class SecureStorageManager(context: Context) {
         }
     }
 
-    companion object {
+    companion object Companion {
         private const val TAG = "SecureStorage"
         private const val PREFS_NAME = "com.openwearables.healthsdk.secure"
         private const val CONFIG_PREFS_NAME = "com.openwearables.healthsdk.config"

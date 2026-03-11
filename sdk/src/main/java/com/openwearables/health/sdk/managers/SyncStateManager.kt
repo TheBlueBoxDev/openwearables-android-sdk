@@ -4,12 +4,14 @@ import android.util.Log
 import com.openwearables.health.sdk.data.entities.SyncState
 import com.openwearables.health.sdk.data.entities.TypeSyncProgress
 import com.openwearables.health.sdk.services.LocalStorageService
+import com.openwearables.health.sdk.services.RemoteSyncService
 import kotlinx.serialization.json.Json
 import java.lang.Exception
 
 class SyncStateManager(
-    val localStorageService: LocalStorageService,
-    val secureStorage: SecureStorageManager
+    val secureStorage: SecureStorage,
+    val syncService: RemoteSyncService,
+    val localStorageService: LocalStorageService
 ) {
 
     private val dateFormatter: java.time.format.DateTimeFormatter =
@@ -49,6 +51,29 @@ class SyncStateManager(
             Log.d(TAG, "SyncState file doesn't exist or is corrupted")
         }
         return null
+    }
+
+    private suspend fun processTypes(
+        types: List<String>,
+        startIndex: Int,
+        fullExport: Boolean,
+        endpoint: String
+    ) {
+        for (i in startIndex until types.size) {
+            val type = types[i]
+            if (!shouldSyncType(type)) {
+                Log.d(TAG,"Skipping $type - already synced")
+                continue
+            }
+
+            updateCurrentTypeIndex(i)
+//            val success = processType(type, fullExport, endpoint)
+//            if (!success) {
+//                Log.d(TAG,"Sync paused at $type, will resume later")
+//                return
+//            }
+        }
+        finalizeSyncState()
     }
 
     fun updateTypeProgress(typeIdentifier: String, sentInChunk: Int, isComplete: Boolean) {
@@ -132,6 +157,5 @@ class SyncStateManager(
     companion object {
         private const val TAG = "SyncStateManager"
         private const val SYNC_STATE_FILE = "state.json"
-        const val SDK_VERSION = "0.2.0"
     }
 }

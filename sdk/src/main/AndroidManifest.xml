@@ -40,6 +40,28 @@
     </queries>
 
     <application>
+        <!-- Health Connect: permissions rationale (Android 14+) -->
+        <activity-alias
+            android:name="ViewPermissionUsageActivity"
+            android:exported="true"
+            android:targetActivity=".managers.PermissionsActivity"
+            android:permission="android.permission.START_VIEW_PERMISSION_USAGE">
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW_PERMISSION_USAGE" />
+                <category android:name="android.intent.category.HEALTH_PERMISSIONS" />
+            </intent-filter>
+        </activity-alias>
+
+        <!-- Health Connect: permissions rationale (Android 12-13) -->
+        <activity-alias
+            android:name="ShowPermissionRationaleActivity"
+            android:exported="true"
+            android:targetActivity=".managers.PermissionsActivity">
+            <intent-filter>
+                <action android:name="androidx.health.ACTION_SHOW_PERMISSIONS_RATIONALE" />
+            </intent-filter>
+        </activity-alias>
+
         <!-- WorkManager foreground service needs dataSync type for background health reads -->
         <service
             android:name="androidx.work.impl.foreground.SystemForegroundService"

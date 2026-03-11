@@ -4,8 +4,11 @@ import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import com.openwearables.health.sdk.data.entities.DeviceInfo
 import com.openwearables.health.sdk.data.entities.DeviceTypeMapper
+import com.openwearables.health.sdk.data.entities.HealthDataRecord
 import com.openwearables.health.sdk.data.entities.ProviderReadResult
+import com.openwearables.health.sdk.data.entities.RawDataSource
 import com.openwearables.health.sdk.data.entities.UnifiedHealthData
 import com.openwearables.health.sdk.data.entities.UnifiedRecord
 import com.openwearables.health.sdk.data.entities.UnifiedSleep
@@ -391,10 +394,17 @@ class SamsungHealthManager(
                 endTime = endMs ?: startMs,
                 dataSource = null,
                 device = DeviceInfo(
-                    deviceId = null, manufacturer = Build.MANUFACTURER, model = Build.MODEL,
-                    name = Build.DEVICE, brand = Build.BRAND, product = Build.PRODUCT,
-                    osType = "Android", osVersion = Build.VERSION.RELEASE,
-                    sdkVersion = Build.VERSION.SDK_INT, deviceType = "MOBILE", isSourceDevice = false
+                    deviceId = null,
+                    manufacturer = Build.MANUFACTURER,
+                    model = Build.MODEL,
+                    name = Build.DEVICE,
+                    brand = Build.BRAND,
+                    product = Build.PRODUCT,
+                    osType = "Android",
+                    osVersion = Build.VERSION.RELEASE,
+                    sdkVersion = Build.VERSION.SDK_INT,
+                    deviceType = "MOBILE",
+                    isSourceDevice = false
                 ),
                 fields = mapOf(fieldName to numericValue)
             )
@@ -1412,33 +1422,3 @@ class SamsungHealthManager(
         } catch (_: Exception) { null }
     }
 }
-
-// ---------------------------------------------------------------------------
-// Internal raw data models (Samsung-specific, not exposed via interface)
-// ---------------------------------------------------------------------------
-
-data class HealthDataRecord(
-    val uid: String,
-    val dataType: String,
-    val startTime: Long,
-    val endTime: Long?,
-    val dataSource: RawDataSource?,
-    val device: DeviceInfo,
-    val fields: Map<String, Any?>
-)
-
-data class RawDataSource(val appId: String, val deviceId: String?)
-
-data class DeviceInfo(
-    val deviceId: String?,
-    val manufacturer: String,
-    val model: String,
-    val name: String,
-    val brand: String,
-    val product: String,
-    val osType: String,
-    val osVersion: String,
-    val sdkVersion: Int,
-    val deviceType: String?,
-    val isSourceDevice: Boolean = false
-)

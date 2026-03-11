@@ -2,29 +2,26 @@ package com.openwearables.healthsdk
 
 import android.content.Context
 import android.util.Log
-import com.openwearables.healthsdk.managers.SecureStorageManager
-import com.openwearables.healthsdk.managers.NetworkConnectionManager
-import com.openwearables.healthsdk.managers.SyncStateManager
-import com.openwearables.healthsdk.managers.SyncRepository
-import com.openwearables.healthsdk.services.LocalStorageService
-import com.openwearables.healthsdk.services.SyncService
+import com.openwearables.health.sdk.managers.SecureStorage
+import com.openwearables.health.sdk.managers.NetworkConnectionManager
+import com.openwearables.health.sdk.managers.SyncStateManager
+import com.openwearables.health.sdk.services.LocalStorageService
+import com.openwearables.health.sdk.services.RemoteSyncService
 
 data class HealthDataType(val id: String)
 
 class OpenWearablesHealthSDK private constructor(val context: Context) {
-    val secureStorage: SecureStorageManager
+    val secureStorage: SecureStorage
     val localStorageService: LocalStorageService
-    val syncService: SyncService
+    val syncService: RemoteSyncService
     val syncStateManager: SyncStateManager
-    val syncStateRepository: SyncRepository
 
     init {
         NetworkConnectionManager.shared.init(context)
-        secureStorage = SecureStorageManager(context)
+        secureStorage = SecureStorage(context)
         localStorageService = LocalStorageService(context)
-        syncService = SyncService(secureStorage)
-        syncStateManager = SyncStateManager(localStorageService, secureStorage)
-        syncStateRepository = SyncRepository(syncService, localStorageService)
+        syncService = RemoteSyncService(secureStorage)
+        syncStateManager = SyncStateManager(secureStorage, syncService, localStorageService)
     }
 
     val syncStatus: Map<String, Any?>

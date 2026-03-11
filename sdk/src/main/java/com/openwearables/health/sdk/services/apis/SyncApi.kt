@@ -10,7 +10,7 @@ import retrofit2.http.Path
 
 interface SyncApi {
 
-    @POST("/api/v1/sdk/users/{userId}/sync/apple")
+    @POST("/sdk/users/{userId}/sync")
     @Headers(
         "Content-Type: application/json"
     )
