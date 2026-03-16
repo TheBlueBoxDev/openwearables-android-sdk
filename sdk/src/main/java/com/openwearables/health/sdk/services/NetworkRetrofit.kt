@@ -8,6 +8,7 @@ import okhttp3.logging.HttpLoggingInterceptor
 import okio.IOException
 import retrofit2.Retrofit
 import retrofit2.converter.gson.GsonConverterFactory
+import java.util.concurrent.TimeUnit
 
 class ConnectivityInterceptor: Interceptor {
 
@@ -29,6 +30,9 @@ class NetworkBaseService(
 
     private val okHttpClient = OkHttpClient.Builder()
         .apply {
+            connectTimeout(30, TimeUnit.SECONDS)
+            readTimeout(120, TimeUnit.SECONDS)
+            writeTimeout(120, TimeUnit.SECONDS)
             addInterceptor(ConnectivityInterceptor())
             addInterceptor(logging)
         }

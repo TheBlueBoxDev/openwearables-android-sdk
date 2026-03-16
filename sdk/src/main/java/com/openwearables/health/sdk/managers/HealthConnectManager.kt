@@ -8,6 +8,8 @@ import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.*
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
+import com.openwearables.health.sdk.ProviderDisplayNames
+import com.openwearables.health.sdk.ProviderIds
 import com.openwearables.health.sdk.interfaces.HealthDataProvider
 import com.openwearables.health.sdk.data.entities.ProviderReadResult
 import com.openwearables.health.sdk.data.entities.UnifiedHealthData
@@ -22,8 +24,8 @@ class HealthConnectManager(
     private val logger: (String) -> Unit
 ) : HealthDataProvider {
 
-    override val providerId = "google"
-    override val providerName = "Health Connect"
+    override val providerId = ProviderIds.GOOGLE
+    override val providerName = ProviderDisplayNames.HEALTH_CONNECT
 
     private lateinit var client: HealthConnectClient
 
@@ -37,12 +39,8 @@ class HealthConnectManager(
 
     override fun getTrackedTypes(): Set<String> = trackedTypeIds
 
-    override fun isAvailable(): Boolean {
-        return HealthConnectClient.getSdkStatus(context) == HealthConnectClient.SDK_AVAILABLE
-    }
-
     fun connect(): Boolean {
-        if (!isAvailable()) {
+        if (!isAvailable(context)) {
             logger("Health Connect not available on this device")
             return false
         }
@@ -314,5 +312,11 @@ class HealthConnectManager(
         "workout" -> ExerciseSessionRecord::class
         "sleep" -> SleepSessionRecord::class
         else -> null
+    }
+
+    companion object {
+        fun isAvailable(context: Context): Boolean {
+            return HealthConnectClient.getSdkStatus(context) == HealthConnectClient.SDK_AVAILABLE
+        }
     }
 }

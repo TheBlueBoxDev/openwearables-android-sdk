@@ -6,6 +6,8 @@ import android.util.Log
 import androidx.core.content.edit
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
+import com.openwearables.health.sdk.ProviderIds
+import com.openwearables.health.sdk.StorageKeys
 import java.security.KeyStore
 
 class SecureStorage(val context: Context) {
@@ -74,8 +76,12 @@ class SecureStorage(val context: Context) {
         context.getSharedPreferences(CONFIG_PREFS_NAME, Context.MODE_PRIVATE)
     }
 
-    var provider: String?
-        get() =  configPrefs.getString(KEY_HEALTH_PROVIDER, null)
+    val syncPrefs: SharedPreferences by lazy {
+        context.getSharedPreferences(StorageKeys.SYNC_PREFS_NAME, Context.MODE_PRIVATE)
+    }
+
+    var provider: String
+        get() = configPrefs.getString(KEY_HEALTH_PROVIDER, ProviderIds.GOOGLE) ?: ProviderIds.GOOGLE
         set(value) { configPrefs.edit { putString(KEY_HEALTH_PROVIDER, value) } }
 
     var host: String

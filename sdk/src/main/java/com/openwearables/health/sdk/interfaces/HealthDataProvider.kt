@@ -19,9 +19,6 @@ interface HealthDataProvider {
     /** Human-readable name for UI display. */
     val providerName: String
 
-    /** `true` when the backing app / API is installed and meets minimum requirements. */
-    fun isAvailable(): Boolean
-
     /** Configure which Flutter-side type IDs should be tracked. */
     fun setTrackedTypes(typeIds: List<String>)
 

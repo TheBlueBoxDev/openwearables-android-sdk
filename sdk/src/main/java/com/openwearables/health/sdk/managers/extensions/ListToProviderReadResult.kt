@@ -30,8 +30,8 @@ import com.openwearables.health.sdk.data.entities.UnifiedHealthData
 import com.openwearables.health.sdk.data.entities.UnifiedRecord
 import com.openwearables.health.sdk.data.entities.UnifiedSleep
 import com.openwearables.health.sdk.data.entities.UnifiedSource
-import com.openwearables.health.sdk.data.entities.UnifiedTimestamp
 import com.openwearables.health.sdk.data.entities.UnifiedWorkout
+import com.openwearables.health.sdk.data.utlis.UnifiedTimestamp
 import java.time.Duration
 import java.time.Instant
 import java.time.ZoneOffset

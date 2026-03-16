@@ -4,6 +4,8 @@ import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import com.openwearables.health.sdk.ProviderDisplayNames
+import com.openwearables.health.sdk.ProviderIds
 import com.openwearables.health.sdk.data.entities.DeviceInfo
 import com.openwearables.health.sdk.data.entities.DeviceTypeMapper
 import com.openwearables.health.sdk.data.entities.HealthDataRecord
@@ -13,7 +15,7 @@ import com.openwearables.health.sdk.data.entities.UnifiedHealthData
 import com.openwearables.health.sdk.data.entities.UnifiedRecord
 import com.openwearables.health.sdk.data.entities.UnifiedSleep
 import com.openwearables.health.sdk.data.entities.UnifiedSource
-import com.openwearables.health.sdk.data.entities.UnifiedTimestamp
+import com.openwearables.health.sdk.data.utlis.UnifiedTimestamp
 import com.openwearables.health.sdk.data.entities.UnifiedWorkout
 import com.openwearables.health.sdk.interfaces.HealthDataProvider
 import com.samsung.android.sdk.health.data.HealthDataStore
@@ -46,8 +48,8 @@ class SamsungHealthManager(
     private val logger: (String) -> Unit
 ) : HealthDataProvider {
 
-    override val providerId = "samsung"
-    override val providerName = "Samsung Health"
+    override val providerId = ProviderIds.SAMSUNG
+    override val providerName = ProviderDisplayNames.SAMSUNG_HEALTH
 
     private lateinit var healthDataStore: HealthDataStore
     private lateinit var deviceManager: DeviceManager
@@ -58,6 +60,19 @@ class SamsungHealthManager(
     companion object {
         private const val SAMSUNG_HEALTH_PACKAGE = "com.sec.android.app.shealth"
         private const val MIN_SAMSUNG_HEALTH_VERSION = 6030002
+
+        fun isAvailable(context: Context): Boolean {
+            return try {
+                val packageInfo = context.packageManager.getPackageInfo(SAMSUNG_HEALTH_PACKAGE, 0)
+                @Suppress("DEPRECATION")
+                val versionCode = packageInfo.versionCode
+                versionCode >= MIN_SAMSUNG_HEALTH_VERSION
+            } catch (_: PackageManager.NameNotFoundException) {
+                false
+            } catch (_: Exception) {
+                false
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -74,19 +89,6 @@ class SamsungHealthManager(
 
     override fun getTrackedTypes(): Set<String> = trackedTypeIds
 
-    override fun isAvailable(): Boolean {
-        return try {
-            val packageInfo = context.packageManager.getPackageInfo(SAMSUNG_HEALTH_PACKAGE, 0)
-            @Suppress("DEPRECATION")
-            val versionCode = packageInfo.versionCode
-            versionCode >= MIN_SAMSUNG_HEALTH_VERSION
-        } catch (_: PackageManager.NameNotFoundException) {
-            false
-        } catch (_: Exception) {
-            false
-        }
-    }
-
     private suspend fun loadConnectedDevices() {
         try {
             deviceManager = healthDataStore.getDeviceManager()
@@ -102,7 +104,7 @@ class SamsungHealthManager(
     }
 
     suspend fun connect(): Boolean = withContext(Dispatchers.Main) {
-        if (!isAvailable()) return@withContext false
+        if (!isAvailable(context)) return@withContext false
 
         try {
             healthDataStore = HealthDataService.getStore(context)
