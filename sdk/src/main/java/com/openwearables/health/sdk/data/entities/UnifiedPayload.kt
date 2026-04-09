@@ -96,6 +96,16 @@ data class UnifiedHealthData(
 
     val totalCount: Int
         get() = records.size + workouts.size + sleep.size
+
+    /**
+     * Returns a copy with only records/workouts/sleep whose startDate >= [floorIso].
+     * The ISO string comparison works because dates are in ISO-8601 format (lexicographic order).
+     */
+    fun filterSince(floorIso: String): UnifiedHealthData = UnifiedHealthData(
+        records = records.filter { it.startDate >= floorIso },
+        workouts = workouts.filter { it.startDate >= floorIso },
+        sleep = sleep.filter { it.startDate >= floorIso },
+    )
 }
 
 @Serializable

@@ -61,7 +61,6 @@ class PermissionsActivity: ComponentActivity() {
                 val granted = deferred.await()
                 if (granted.size < needed.size) {
                     Log.d("Permissions activity", "Not all permissions were granted")
-
                 }
             } catch (e: Exception) {
                 Log.d("Permissions activity", "Health Connect permission request failed: ${e.message}")

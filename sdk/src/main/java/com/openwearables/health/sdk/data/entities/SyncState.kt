@@ -7,7 +7,8 @@ data class TypeSyncProgress(
     val typeIdentifier: String,
     var sentCount: Int = 0,
     var isComplete: Boolean = false,
-    var pendingAnchorTimestamp: Long? = null
+    var pendingAnchorTimestamp: Long? = null,
+    var pendingOlderThan: Long? = null
 )
 
 @Serializable
@@ -17,8 +18,7 @@ data class SyncState(
     val createdAt: Long,
     val typeProgress: MutableMap<String, TypeSyncProgress> = mutableMapOf(),
     var totalSentCount: Int = 0,
-    val completedTypes: MutableSet<String> = mutableSetOf(),
-    var currentTypeIndex: Int = 0
+    val completedTypes: MutableSet<String> = mutableSetOf()
 ) {
     val hasProgress: Boolean
         get() {

@@ -1,7 +1,6 @@
 package com.openwearables.health.sdk.managers
 
 import android.content.Context
-import android.util.Log
 import androidx.core.content.edit
 import androidx.work.Constraints
 import androidx.work.ExistingPeriodicWorkPolicy
@@ -11,11 +10,12 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.OutOfQuotaPolicy
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
-import com.openwearables.health.sdk.StorageKeys
-import com.openwearables.health.sdk.SyncDefaults
+import com.openwearables.health.sdk.data.StorageKeys
+import com.openwearables.health.sdk.data.SyncDefaults
 import com.openwearables.health.sdk.data.entities.HealthSyncWorker
 import com.openwearables.health.sdk.data.entities.SyncState
 import com.openwearables.health.sdk.data.entities.TypeSyncProgress
+import com.openwearables.health.sdk.data.entities.UnifiedHealthData
 import com.openwearables.health.sdk.data.requests.HealthDataTypeRequest
 import com.openwearables.health.sdk.data.utlis.UnifiedTimestamp
 import com.openwearables.health.sdk.interfaces.HealthDataProvider
@@ -24,11 +24,6 @@ import com.openwearables.health.sdk.services.RemoteSyncService
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import kotlinx.serialization.json.Json
-import kotlinx.serialization.json.JsonArray
-import kotlinx.serialization.json.JsonElement
-import kotlinx.serialization.json.JsonNull
-import kotlinx.serialization.json.JsonObject
-import kotlinx.serialization.json.JsonPrimitive
 import java.lang.Exception
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
@@ -38,8 +33,19 @@ class SyncStateManager(
     val healthProvider: HealthDataProvider,
     val secureStorage: SecureStorage,
     val syncService: RemoteSyncService,
-    val localStorageService: LocalStorageService
+    val localStorageService: LocalStorageService,
+    private val logger: (String) -> Unit
 ) {
+    // MARK: - Round-Robin Sync Orchestration (combined payloads)
+    private data class FetchResult(
+        val type: String,
+        val data: UnifiedHealthData = UnifiedHealthData(),
+        val count: Int = 0,
+        val nextCursor: Long? = null,
+        val anchorTimestamp: Long? = null,
+        val isDone: Boolean = false
+    )
+
     private var inMemoryState: SyncState? = null
     private val stateMutex = Mutex()
     private val isSyncing = AtomicBoolean(false)
@@ -50,10 +56,28 @@ class SyncStateManager(
         }
 
     val hasResumableSyncSession: Boolean
-        get () {
+        get() {
             val state = loadSyncStateFromDisk() ?: return false
             return state.hasProgress
         }
+
+    // MARK: - Sync Start Timestamp
+    /**
+     * Computes the earliest epoch-ms timestamp to sync from, based on persisted `syncDaysBack`.
+     * Returns the start of the day (midnight local time) that many days ago,
+     * or `null` if full sync (no limit) is configured.
+     */
+    private fun syncStartTimestamp(): Long? {
+        val daysBack = secureStorage.syncDaysBack
+        if (daysBack <= 0) return null
+        val cal = java.util.Calendar.getInstance()
+        cal.set(java.util.Calendar.HOUR_OF_DAY, 0)
+        cal.set(java.util.Calendar.MINUTE, 0)
+        cal.set(java.util.Calendar.SECOND, 0)
+        cal.set(java.util.Calendar.MILLISECOND, 0)
+        cal.add(java.util.Calendar.DAY_OF_YEAR, -daysBack)
+        return cal.timeInMillis
+    }
 
     // MARK: - Save/Load Sync State
     fun persistStateToDisk(state: SyncState) {
@@ -68,137 +92,187 @@ class SyncStateManager(
             if (state.userKey == secureStorage.userKey)
                 return state
             else {
-                Log.d(TAG,"Sync state for different user, clearing")
+                logger("Sync state for different user, clearing")
                 clearSyncSession()
                 return null
             }
-        } catch (e: Exception) {
-            Log.d(TAG, "SyncState file doesn't exist or is corrupted")
+        } catch (_: Exception) {
+            logger("SyncState file doesn't exist or is corrupted")
         }
         return null
     }
 
     // MARK: - Process types
-    /**
-     * Full-export: fetch data newest-first in chunks. Uses a while loop
-     * instead of recursion to avoid continuation chain buildup on large datasets.
-     */
-    suspend fun processTypeNewestFirst(type: String): Boolean {
-        var olderThan: Long? = null
+
+    private suspend fun processTypesRoundRobin(
+        types: List<String>,
+        fullExport: Boolean
+    )  {
+        val olderThanCursors = mutableMapOf<String, Long?>()
+        val anchorCursors = mutableMapOf<String, Long?>()
+        val completedTypes = mutableSetOf<String>()
+
+        stateMutex.withLock {
+            inMemoryState?.let { state ->
+                completedTypes.addAll(state.completedTypes)
+                for ((id, progress) in state.typeProgress) {
+                    if (!progress.isComplete) {
+                        progress.pendingOlderThan?.let { olderThanCursors[id] = it }
+                        progress.pendingAnchorTimestamp?.let { anchorCursors[id] = it }
+                    }
+                }
+            }
+        }
+
+        if (!fullExport) {
+            val anchors = loadAnchors()
+            val floor = syncStartTimestamp()
+            for (type in types) {
+                if (!completedTypes.contains(type) && !anchorCursors.containsKey(type)) {
+                    val storedAnchor = anchors[type]
+                    val anchor = when {
+                        storedAnchor != null && floor != null -> maxOf(storedAnchor, floor)
+                        storedAnchor != null -> storedAnchor
+                        else -> floor
+                    }
+                    anchorCursors[type] = anchor
+                }
+            }
+        }
 
         while (true) {
-            Log.d(TAG,"  $type: querying (newest first${olderThan?.let { ", olderThan=${java.time.Instant.ofEpochMilli(it)}" } ?: ""})...")
+            val incompleteTypes = types.filter { !completedTypes.contains(it) }
+            if (incompleteTypes.isEmpty()) break
 
-            val result = healthProvider.readDataDescending(type, olderThan, SyncDefaults.CHUNK_SIZE)
+            val perTypeLimit = maxOf(1, SyncDefaults.CHUNK_SIZE / incompleteTypes.size)
 
-            if (result.data.isEmpty) {
-                Log.d(TAG,"  $type: all data sent (newest first)")
-                stateMutex.withLock {
-                    updateInMemoryProgress(type, 0, isComplete = true, anchorTimestamp = null)
+            // Phase 1: Fetch one chunk from each type (no network yet)
+            val roundResults = mutableListOf<FetchResult>()
+
+            for (type in incompleteTypes) {
+                val result = if (fullExport) {
+                    fetchOneChunkNewestFirst(type, olderThanCursors[type], perTypeLimit)
+                } else {
+                    fetchOneChunkIncremental(type, anchorCursors[type], perTypeLimit)
                 }
-                return true
+
+                roundResults.add(result)
+
+                if (result.isDone) {
+                    completedTypes.add(type)
+                } else {
+                    if (fullExport) olderThanCursors[type] = result.nextCursor
+                    else anchorCursors[type] = result.nextCursor
+                }
             }
 
-            val count = result.data.totalCount
-            val payload = HealthDataTypeRequest(
-                provider = healthProvider.providerId,
-                sdkVersion = SyncDefaults.SDK_VERSION,
-                UnifiedTimestamp.fromEpochMs(System.currentTimeMillis()),
-                data = result.data
+            // Phase 2: Merge all fetched data into one combined payload
+            val mergedData = UnifiedHealthData(
+                records = roundResults.flatMap { it.data.records },
+                workouts = roundResults.flatMap { it.data.workouts },
+                sleep = roundResults.flatMap { it.data.sleep }
             )
-            val sendResult = syncService.sendPayload(payload)
 
-            if (!sendResult.success) {
-                val reason = sendResult.statusCode?.let { "HTTP $it" } ?: "network error"
-                Log.d(TAG,"  $type: $count items -> failed ($reason)")
-                return false
+            if (!mergedData.isEmpty) {
+                val payload = HealthDataTypeRequest(secureStorage.provider, data = mergedData)
+                val sendResult = syncService.sendPayload(payload)
+
+                if (!sendResult.success) {
+                    val reason = sendResult.statusCode?.let { "HTTP $it" } ?: "network error"
+                    logger("Combined round failed ($reason)")
+                    stateMutex.withLock {
+                        inMemoryState?.let { persistStateToDisk(it) }
+                    }
+                    return
+                }
+
+                logger("Round sent: ${mergedData.totalCount} items) -> ${sendResult.statusCode}")
             }
 
-            val anchorTs = if (olderThan == null) result.maxTimestamp else null
-            val isLastChunk = count < SyncDefaults.CHUNK_SIZE
-
+            // Phase 3: Update progress for all types in this round
             stateMutex.withLock {
-                updateInMemoryProgress(type, count, isComplete = isLastChunk, anchorTimestamp = anchorTs)
+                for (result in roundResults) {
+                    updateInMemoryProgress(result.type, result.count, isComplete = result.isDone, anchorTimestamp = result.anchorTimestamp)
+                    if (fullExport && !result.isDone) {
+                        inMemoryState?.typeProgress?.get(result.type)?.pendingOlderThan = result.nextCursor
+                    }
+                }
+                inMemoryState?.let { persistStateToDisk(it) }
             }
+        }
 
-            if (isLastChunk) return true
+        stateMutex.withLock {
+            val state = inMemoryState ?: return
 
-            olderThan = result.minTimestamp
+            if (state.fullExport) secureStorage.fullExport = true
+            logger("Sync: complete (${state.totalSentCount} items, ${state.completedTypes.size} types)")
+            clearSyncSession()
         }
     }
 
-    private suspend fun processType(type: String, fullExport: Boolean): Boolean {
-        if (fullExport) { return processTypeNewestFirst(type) }
+    // MARK: - Fetch-Only Chunk Processors (no network)
+    private suspend fun fetchOneChunkNewestFirst(
+        type: String,
+        olderThan: Long?,
+        limit: Int
+    ): FetchResult {
+        val floor = syncStartTimestamp()
+        val floorIso = floor?.let { UnifiedTimestamp.fromEpochMs(it) }
 
-        val anchors = loadAnchors()
-        val anchor = anchors[type]
+        logger("  $type: querying (newest first, limit=$limit${olderThan?.let { ", olderThan=${java.time.Instant.ofEpochMilli(it)}" } ?: ""})...")
 
-        val result = healthProvider.readData(type, anchor, SyncDefaults.CHUNK_SIZE)
+        val result = healthProvider.readDataDescending(type, olderThan, limit)
 
         if (result.data.isEmpty) {
-            Log.d(TAG, "  $type: no new data")
-            stateMutex.withLock {
-                updateInMemoryProgress(type, 0, isComplete = true, anchorTimestamp = null)
-            }
-            return true
+            logger("  $type: all data sent (newest first)")
+            return FetchResult(type = type, isDone = true)
+        }
+
+        val reachedFloor = floor != null && result.minTimestamp != null && result.minTimestamp <= floor
+        val isLastChunk = result.data.totalCount < limit || reachedFloor
+
+        val data = if (reachedFloor && floorIso != null) result.data.filterSince(floorIso) else result.data
+
+        if (data.isEmpty) {
+            logger("  $type: all data within range sent")
+            return FetchResult(type = type, isDone = true)
+        }
+
+        val anchorTs = if (olderThan == null) result.maxTimestamp else null
+        val nextOlderThan = if (isLastChunk) null else result.minTimestamp
+
+        logger("  $type: ${data.totalCount} samples (newest first)")
+
+        return FetchResult(
+            type = type, data = data, count = data.totalCount,
+            nextCursor = nextOlderThan, anchorTimestamp = anchorTs, isDone = isLastChunk
+        )
+    }
+
+    private suspend fun fetchOneChunkIncremental(
+        type: String,
+        anchor: Long?,
+        limit: Int
+    ): FetchResult {
+        logger("  $type: querying (limit=$limit)...")
+
+        val result = healthProvider.readData(type, anchor, limit)
+
+        if (result.data.isEmpty) {
+            logger("  $type: no new data")
+            return FetchResult(type = type, isDone = true)
         }
 
         val count = result.data.totalCount
-        val payload = HealthDataTypeRequest(
-            provider = healthProvider.providerId,
-            sdkVersion = SyncDefaults.SDK_VERSION,
-            UnifiedTimestamp.fromEpochMs(System.currentTimeMillis()),
-            data = result.data
+        val isLastChunk = count < limit
+
+        logger("  $type: $count samples")
+
+        return FetchResult(
+            type = type, data = result.data, count = count,
+            nextCursor = result.maxTimestamp, anchorTimestamp = result.maxTimestamp,
+            isDone = isLastChunk
         )
-        val sendResult = syncService.sendPayload(payload)
-
-        if (sendResult.success) {
-            stateMutex.withLock {
-                updateInMemoryProgress(type, count, isComplete = true, anchorTimestamp = result.maxTimestamp)
-            }
-            return true
-        }
-        return false
-    }
-
-    private fun finalizeSyncState() {
-        val state = inMemoryState ?: return
-        if (state.fullExport) secureStorage.fullExport = true
-        clearSyncSession()
-    }
-
-    private suspend fun processTypes(
-        types: List<String>,
-        startIndex: Int,
-        fullExport: Boolean
-    ) {
-        for (i in startIndex until types.size) {
-            val type = types[i]
-            val alreadySynced = stateMutex.withLock {
-                inMemoryState?.completedTypes?.contains(type) == true
-            }
-            if (alreadySynced) {
-                Log.d(TAG,"Skipping $type - already synced")
-                continue
-            }
-
-            stateMutex.withLock {
-                inMemoryState?.currentTypeIndex = i
-            }
-
-            val success = processType(type, fullExport)
-            if (!success) {
-                Log.d(TAG,"Sync paused at $type, will resume later")
-                stateMutex.withLock {
-                    val status = inMemoryState ?: return
-                    persistStateToDisk(status)
-                }
-                return
-            }
-        }
-        stateMutex.withLock {
-            finalizeSyncState()
-        }
     }
 
     private fun updateInMemoryProgress(typeIdentifier: String, sentInChunk: Int, isComplete: Boolean, anchorTimestamp: Long?) {
@@ -208,18 +282,18 @@ class SyncStateManager(
         progress.isComplete = isComplete
 
         if (anchorTimestamp != null) progress.pendingAnchorTimestamp = anchorTimestamp
-        state.typeProgress[typeIdentifier] = progress
         state.totalSentCount += sentInChunk
 
         if (isComplete) {
             state.completedTypes.add(typeIdentifier)
             progress.pendingAnchorTimestamp?.let { saveAnchor(typeIdentifier, it) }
-            persistStateToDisk(state)
         }
     }
 
     fun clearSyncSession() {
+        inMemoryState = null
         localStorageService.remove(SYNC_STATE_FILE)
+        logger("Cleared sync state")
     }
 
     // MARK: - Get Sync Status
@@ -247,7 +321,7 @@ class SyncStateManager(
     // MARK: - Background Sync
     suspend fun startBackgroundSync(): Boolean {
         schedulePeriodicSync()
-        syncNow(fullExport = !secureStorage.fullExport)
+        scheduleExpeditedSync()
         return true
     }
 
@@ -267,7 +341,7 @@ class SyncStateManager(
             ExistingPeriodicWorkPolicy.UPDATE,
             work
         )
-        Log.d(TAG,"Scheduled periodic sync every $syncIntervalMinutes minute(s)")
+        logger("Scheduled periodic sync every $syncIntervalMinutes minute(s)")
     }
 
     fun scheduleExpeditedSync() {
@@ -283,39 +357,40 @@ class SyncStateManager(
         WorkManager.getInstance(context).enqueueUniqueWork(
             SyncDefaults.WORK_NAME_EXPEDITED, ExistingWorkPolicy.REPLACE, expeditedWork
         )
-        Log.d(TAG,"Scheduled expedited sync")
+        logger("Scheduled expedited sync")
     }
 
     suspend fun stopBackgroundSync() {
         WorkManager.getInstance(context).cancelUniqueWork(SyncDefaults.WORK_NAME_PERIODIC)
-        Log.d(TAG,"Cancelled periodic sync")
+        logger("Cancelled periodic sync")
     }
 
     // MARK: - Sync Now
     suspend fun syncNow(fullExport: Boolean) {
         if (!isSyncing.compareAndSet(false, true)) {
-            Log.d(TAG,"Sync already in progress")
+            logger("Sync already in progress")
             return
         }
 
         try {
             val trackedTypes = healthProvider.getTrackedTypes().toList()
             if (trackedTypes.isEmpty()) {
-                Log.d(TAG, "No tracked types configured")
+                logger("No tracked types configured")
                 return
             }
 
             val existingState = stateMutex.withLock { loadSyncStateFromDisk() }
             val isResuming = existingState != null && existingState.hasProgress
 
-            val startIndex: Int
+            val floor = syncStartTimestamp()
+            val floorLabel = if (floor != null) "since ${java.time.Instant.ofEpochMilli(floor)}" else "full history"
+
             if (isResuming) {
-                Log.d(TAG, "Sync: resuming (${existingState.totalSentCount} sent, ${existingState.completedTypes.size}/${trackedTypes.size} types done)")
-                startIndex = existingState.currentTypeIndex
+                logger("Sync: resuming (${existingState.totalSentCount} sent, ${existingState.completedTypes.size}/${trackedTypes.size} types done, $floorLabel))")
                 stateMutex.withLock { inMemoryState = existingState }
             } else {
                 val mode = if (fullExport) "full export" else "incremental"
-                Log.d(TAG, "Sync: starting ($mode, ${trackedTypes.size} types, ${healthProvider.providerName})")
+                logger("Sync: starting ($mode, ${trackedTypes.size} types, ${healthProvider.providerName}, $floorLabel)")
                 stateMutex.withLock {
                     val state = SyncState(
                         userKey = secureStorage.userKey,
@@ -325,26 +400,11 @@ class SyncStateManager(
                     persistStateToDisk(state)
                     inMemoryState = state
                 }
-                startIndex = 0
             }
 
-            processTypes(trackedTypes, startIndex, fullExport)
+            processTypesRoundRobin(trackedTypes, fullExport)
         } finally {
             isSyncing.set(false)
-        }
-    }
-
-    private fun mapToJsonElement(value: Any?): JsonElement {
-        return when (value) {
-            null -> JsonNull
-            is Boolean -> JsonPrimitive(value)
-            is Number -> JsonPrimitive(value)
-            is String -> JsonPrimitive(value)
-            is Map<*, *> -> JsonObject(
-                value.entries.associate { (k, v) -> k.toString() to mapToJsonElement(v) }
-            )
-            is List<*> -> JsonArray(value.map { mapToJsonElement(it) })
-            else -> JsonPrimitive(value.toString())
         }
     }
 
@@ -362,11 +422,10 @@ class SyncStateManager(
     private fun saveAnchor(type: String, timestamp: Long) {
         val current = loadAnchors().toMutableMap()
         current[type] = timestamp
-        val element = mapToJsonElement(current)
         secureStorage.syncPrefs.edit {
             putString(
                 StorageKeys.KEY_ANCHORS,
-                json.encodeToString(JsonElement.serializer(), element)
+                json.encodeToString(current.mapValues { it.value.toDouble() })
             )
         }
     }
@@ -375,10 +434,12 @@ class SyncStateManager(
         secureStorage.fullExport = false
         secureStorage.syncPrefs.edit { remove(StorageKeys.KEY_ANCHORS) }
         clearSyncSession()
+        logger("Anchors reset - will perform full sync on next sync")
     }
 
+    fun retryOutboxIfPossible() { /* reserved for future use */ }
+
     companion object {
-        private const val TAG = "SyncStateManager"
         private const val SYNC_STATE_FILE = "state.json"
         private val dateFormatter: java.time.format.DateTimeFormatter =
             java.time.format.DateTimeFormatter.ofPattern("yyyy-MM-dd'T'HH:mm:ss.SSS'Z'")

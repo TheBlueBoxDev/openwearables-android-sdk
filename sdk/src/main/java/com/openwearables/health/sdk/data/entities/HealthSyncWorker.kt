@@ -8,9 +8,12 @@ import android.util.Log
 import androidx.core.app.NotificationCompat
 import androidx.work.CoroutineWorker
 import androidx.work.ForegroundInfo
+import androidx.work.PeriodicWorkRequest
 import androidx.work.WorkerParameters
-import com.openwearables.health.sdk.NotificationConfig
-import com.openwearables.health.sdk.ProviderIds
+import com.openwearables.health.sdk.data.NotificationConfig
+import com.openwearables.health.sdk.data.ProviderIds
+import com.openwearables.health.sdk.data.utlis.DefaultDispatcherProvider
+import com.openwearables.health.sdk.data.utlis.DispatcherProvider
 import com.openwearables.health.sdk.interfaces.HealthDataProvider
 import com.openwearables.health.sdk.managers.HealthConnectManager
 import com.openwearables.health.sdk.managers.SamsungHealthManager
@@ -19,26 +22,34 @@ import com.openwearables.health.sdk.managers.SyncStateManager
 import com.openwearables.health.sdk.services.LocalStorageService
 import com.openwearables.health.sdk.services.RemoteSyncService
 
+/**
+ * WorkManager worker for background health data synchronization.
+ *
+ * Scheduled as a [PeriodicWorkRequest] by [SyncStateManager]. The worker does NOT
+ * manually schedule the next run — WorkManager handles periodic re-execution.
+ */
 class HealthSyncWorker(
     context: Context,
     params: WorkerParameters
 ) : CoroutineWorker(context, params) {
     val secureStorage: SecureStorage by lazy { SecureStorage(context) }
+    val log: (String) -> Unit = { Log.d("HealthSyncWorker", it) }
 
     override suspend fun doWork(): Result {
         try {
             setForeground(getForegroundInfo())
-            Log.d("HealthSyncWorker", "Running as foreground service")
+            log("Running as foreground service")
         } catch (e: Exception) {
-            Log.w("HealthSyncWorker", "Could not promote to foreground: ${e.message}")
+            log("Could not promote to foreground: ${e.message}")
         }
 
-        val provider = createProvider(applicationContext, secureStorage)
+        val dispatchers = DefaultDispatcherProvider()
+        val provider = createProvider(applicationContext, secureStorage, dispatchers)
         val syncService = RemoteSyncService(secureStorage)
         val localStorageService = LocalStorageService(applicationContext)
 
         val syncManager = SyncStateManager(
-            applicationContext, provider, secureStorage, syncService, localStorageService
+            applicationContext, provider, secureStorage, syncService, localStorageService, log
         )
 
         return try {
@@ -57,22 +68,22 @@ class HealthSyncWorker(
 
     private fun createProvider(
         context: Context,
-        storage: SecureStorage
+        storage: SecureStorage,
+        dispatchers: DispatcherProvider
     ): HealthDataProvider {
         val providerId = storage.provider
-        val log: (String) -> Unit = { Log.d("HealthSyncWorker", it) }
         return when (providerId) {
-            ProviderIds.GOOGLE -> HealthConnectManager(context, log)
-            else -> SamsungHealthManager(context, log)
+            ProviderIds.GOOGLE -> HealthConnectManager(context, dispatchers, log)
+            else -> SamsungHealthManager(context, dispatchers, log)
         }
     }
 
     override suspend fun getForegroundInfo(): ForegroundInfo {
         createNotificationChannel()
         val notification = NotificationCompat.Builder(applicationContext, NotificationConfig.CHANNEL_ID)
-            .setContentTitle(NotificationConfig.CHANNEL_NAME)
-            .setContentText("Syncing health data...")
-//            .setSmallIcon(R.drawable.ic_popup_sync)
+            .setContentTitle(secureStorage.notificationTitle)
+            .setContentText(secureStorage.notificationText)
+            .setSmallIcon(android.R.drawable.ic_popup_sync)
             .setPriority(NotificationCompat.PRIORITY_LOW)
             .setOngoing(true)
             .build()

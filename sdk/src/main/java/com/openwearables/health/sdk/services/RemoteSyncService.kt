@@ -8,12 +8,23 @@ import com.openwearables.health.sdk.services.apis.AuthApi
 import com.openwearables.health.sdk.services.apis.SyncApi
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import okio.withLock
+import java.util.concurrent.locks.ReentrantLock
 import kotlin.getValue
 
 class RemoteSyncService(
     private val secureStorage: SecureStorage,
     private val onAuthError: ((Int, String) -> Unit)? = null
 ) {
+    private val tokenRefreshLock = ReentrantLock()
+    private var isRefreshingToken = false
+
+    // MARK: - Token Refresh
+
+    private enum class TokenRefreshResult {
+        SUCCESS, AUTH_FAILURE, NETWORK_ERROR
+    }
+
     // MARK: - Sync Endpoint
     private val syncEndpoint: String? by lazy {
         val userId = secureStorage.userId ?: return@lazy null
@@ -47,22 +58,26 @@ class RemoteSyncService(
             return secureStorage.apiKey != null && secureStorage.accessToken == null
         }
 
-    val isSyncActive: Boolean
-        get() {
-            return secureStorage.syncActive
-        }
+    // MARK: - Auth
+    private fun bearerValue(token: String): String =
+        if (token.startsWith("Bearer ")) token else "Bearer $token"
 
     // MARK: - Token Refresh
-    private suspend fun attemptTokenRefresh(): Boolean = withContext(Dispatchers.IO) {
-        val oldRefreshToken = secureStorage.refreshToken ?: return@withContext false
+    private suspend fun attemptTokenRefresh(): TokenRefreshResult = withContext(Dispatchers.IO) {
+        val oldRefreshToken = secureStorage.refreshToken ?: return@withContext TokenRefreshResult.AUTH_FAILURE
+        tokenRefreshLock.withLock { isRefreshingToken = true }
         try {
             return@withContext authAPI?.refreshTokens(RefreshTokenRequest(oldRefreshToken))
                 ?.body()?.let {
                     secureStorage.updateTokens(it.accessToken, it.refreshToken)
-                    return@let true
-                } ?: false
+                    return@let TokenRefreshResult.SUCCESS
+                } ?: run {
+                    return@run TokenRefreshResult.NETWORK_ERROR
+            }
         } catch (_: Exception) {
-            return@withContext false
+            return@withContext TokenRefreshResult.NETWORK_ERROR
+        } finally {
+            tokenRefreshLock.withLock { isRefreshingToken = false }
         }
     }
 
@@ -75,7 +90,7 @@ class RemoteSyncService(
             try {
                 val response = syncAPI?.syncHealthData(
                     secureStorage.apiKey,
-                    secureStorage.accessToken,
+                    bearerValue(secureStorage.accessToken ?: ""),
                     userId, payload
                 )
 
@@ -99,19 +114,25 @@ class RemoteSyncService(
             return false
         }
 
-        if (attemptTokenRefresh()) {
-            Log.d(TAG, "Retrying upload with refreshed token...")
-            val retryResponse = sendPayload(payloadToRetry)
-
-            if (retryResponse.success)
-                return true
-            else {
-                onAuthError?.invoke(401, "Retry failed")
+        when (attemptTokenRefresh()) {
+            TokenRefreshResult.SUCCESS -> {
+                val retryResponse = sendPayload(payloadToRetry)
+                if (retryResponse.success)
+                    return true
+                else {
+                    onAuthError?.invoke(401, "Retry failed")
+                    return false
+                }
+            }
+            TokenRefreshResult.AUTH_FAILURE -> {
+                onAuthError?.invoke(401, "Unauthorized - please re-authenticate")
+                return false
+            }
+            TokenRefreshResult.NETWORK_ERROR -> {
+                Log.d(TAG, "Token refresh failed (network) - will retry later")
                 return false
             }
         }
-        onAuthError?.invoke(401, "Unauthorized - please re-authenticate")
-        return false
     }
 
     companion object {

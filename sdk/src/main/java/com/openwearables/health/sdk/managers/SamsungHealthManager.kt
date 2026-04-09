@@ -4,8 +4,8 @@ import android.app.Activity
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
-import com.openwearables.health.sdk.ProviderDisplayNames
-import com.openwearables.health.sdk.ProviderIds
+import com.openwearables.health.sdk.data.ProviderDisplayNames
+import com.openwearables.health.sdk.data.ProviderIds
 import com.openwearables.health.sdk.data.entities.DeviceInfo
 import com.openwearables.health.sdk.data.entities.DeviceTypeMapper
 import com.openwearables.health.sdk.data.entities.HealthDataRecord
@@ -17,6 +17,7 @@ import com.openwearables.health.sdk.data.entities.UnifiedSleep
 import com.openwearables.health.sdk.data.entities.UnifiedSource
 import com.openwearables.health.sdk.data.utlis.UnifiedTimestamp
 import com.openwearables.health.sdk.data.entities.UnifiedWorkout
+import com.openwearables.health.sdk.data.utlis.DispatcherProvider
 import com.openwearables.health.sdk.interfaces.HealthDataProvider
 import com.samsung.android.sdk.health.data.HealthDataStore
 import com.samsung.android.sdk.health.data.DeviceManager
@@ -45,6 +46,7 @@ import kotlin.collections.iterator
 
 class SamsungHealthManager(
     private val context: Context,
+    private val dispatchers: DispatcherProvider,
     private val logger: (String) -> Unit
 ) : HealthDataProvider {
 
@@ -126,10 +128,10 @@ class SamsungHealthManager(
         }
         (context as? Activity)?.let {
             if (::healthDataStore.isInitialized) {
-                return withContext(Dispatchers.Main) {
+                return withContext(dispatchers.main) {
                     try {
                         val permissions =
-                            dataTypes.map { Permission.of(it, AccessType.READ) }.toSet()
+                            dataTypes.map { datatype -> Permission.of(datatype, AccessType.READ) }.toSet()
                         logger("Requesting ${permissions.size} Samsung Health permissions...")
                         val granted = healthDataStore.requestPermissions(permissions,it)
                         val allGranted = granted.size == permissions.size
@@ -177,9 +179,9 @@ class SamsungHealthManager(
         sinceTimestamp: Long? = null,
         olderThanTimestamp: Long? = null,
         limit: Int
-    ): List<HealthDataRecord> = withContext(Dispatchers.IO) {
+    ): List<HealthDataRecord> = withContext(dispatchers.io) {
         if (!::healthDataStore.isInitialized) {
-            val isConnected = withContext(Dispatchers.Main) { connect() }
+            val isConnected = withContext(dispatchers.main) { connect() }
             if (!isConnected) return@withContext emptyList()
         }
 
@@ -196,13 +198,7 @@ class SamsungHealthManager(
             logger("[$typeId] Raw SDK response: ${response.dataList.size} data points")
 
             val records = response.dataList.mapNotNull { dp ->
-                val parsed = parseDataPoint(typeId, dp)
-                if (parsed == null) {
-                    logger("[$typeId] parseDataPoint returned null for uid=${dp.uid}")
-                } else {
-                    logger("[$typeId] Parsed record uid=${parsed.uid}, fields=${parsed.fields}")
-                }
-                parsed
+                parseDataPoint(typeId, dp)
             }
             logger("[$typeId] After parsing: ${records.size} records (dropped ${response.dataList.size - records.size})")
             records
@@ -292,8 +288,6 @@ class SamsungHealthManager(
 
             val request = builderClass.getMethod("build").invoke(builder) as? AggregateRequest<Any>
             request?.let {
-                logger("[$typeId] Built aggregate request: ${request.javaClass.name}")
-
                 val response = healthDataStore.aggregateData(request)
                 val dataList = response.dataList
                 logger("[$typeId] Aggregate response: ${dataList.size} items")
@@ -340,16 +334,11 @@ class SamsungHealthManager(
         try {
             val allOps = dataType.javaClass.getMethod("getAllAggregateOperations").invoke(dataType)
             if (allOps is Collection<*> && allOps.isNotEmpty()) {
-                logger("[$typeId] Found ${allOps.size} aggregate operations")
                 for (op in allOps) {
                     val name = try { op?.javaClass?.getMethod("getName")?.invoke(op)?.toString() } catch (_: Exception) { null }
                     logger("[$typeId]   op: ${op?.javaClass?.simpleName}, name=$name")
-                    if (name != null && name.equals(opName, ignoreCase = true)) {
-                        logger("[$typeId] Matched op by name: $name")
-                        return op
-                    }
+                    if (name != null && name.equals(opName, ignoreCase = true)) return op
                 }
-                logger("[$typeId] No name match, using first op")
                 return allOps.first()
             }
         } catch (e: Exception) {
@@ -395,6 +384,7 @@ class SamsungHealthManager(
                 startTime = startMs,
                 endTime = endMs ?: startMs,
                 dataSource = null,
+                zoneOffset = null,
                 device = DeviceInfo(
                     deviceId = null,
                     manufacturer = Build.MANUFACTURER,
@@ -412,7 +402,6 @@ class SamsungHealthManager(
             )
         } catch (e: Exception) {
             logger("[$typeId] Failed to parse aggregate item: ${e.javaClass.simpleName}: ${e.message}")
-            logger("[$typeId] Item class: ${item.javaClass.name}, methods: ${item.javaClass.methods.map { it.name }}")
             return null
         }
     }
@@ -460,36 +449,15 @@ class SamsungHealthManager(
                 val hr = (raw.fields["HEART_RATE"] as? Number)?.toDouble() ?: return null
                 listOf(
                     UnifiedRecord(
-                        raw.uid,
-                        "HEART_RATE",
-                        startDate,
-                        endDate,
-                        zoneOffset,
-                        source,
-                        hr,
-                        "bpm",
-                        null,
-                        null
+                        raw.uid, "HEART_RATE", startDate, endDate, zoneOffset, source, hr, "bpm", null, null
                     )
                 )
             }
             "steps" -> {
-                val totalRaw = raw.fields["TOTAL"]
-                val total = (totalRaw as? Number)?.toDouble()
-                logger("[steps] convertRecords: uid=${raw.uid}, TOTAL raw=$totalRaw (type=${totalRaw?.javaClass?.simpleName}), converted=$total, allFields=${raw.fields}")
-                if (total == null) return null
+                val total = (raw.fields["TOTAL"] as? Number)?.toDouble() ?: return null
                 listOf(
                     UnifiedRecord(
-                        raw.uid,
-                        "STEP_COUNT",
-                        startDate,
-                        endDate,
-                        zoneOffset,
-                        source,
-                        total,
-                        "count",
-                        null,
-                        null
+                        raw.uid, "STEP_COUNT", startDate, endDate, zoneOffset, source, total, "count", null, null
                     )
                 )
             }
@@ -497,16 +465,7 @@ class SamsungHealthManager(
                 val spo2 = (raw.fields["OXYGEN_SATURATION"] as? Number)?.toDouble() ?: return null
                 listOf(
                     UnifiedRecord(
-                        raw.uid,
-                        "OXYGEN_SATURATION",
-                        startDate,
-                        endDate,
-                        zoneOffset,
-                        source,
-                        spo2,
-                        "%",
-                        null,
-                        null
+                        raw.uid, "OXYGEN_SATURATION", startDate, endDate, zoneOffset, source, spo2, "%", null, null
                     )
                 )
             }
@@ -519,16 +478,7 @@ class SamsungHealthManager(
                 raw.fields["SAMPLE_SOURCE_TYPE"]?.let { meta["sampleSourceType"] = it.toString() }
                 listOf(
                     UnifiedRecord(
-                        raw.uid,
-                        "BLOOD_GLUCOSE",
-                        startDate,
-                        endDate,
-                        zoneOffset,
-                        source,
-                        mmol,
-                        "mmol/L",
-                        null,
-                        meta.ifEmpty { null })
+                        raw.uid, "BLOOD_GLUCOSE", startDate, endDate, zoneOffset, source, mmol, "mmol/L", null, meta.ifEmpty { null })
                 )
             }
             "bloodPressure", "bloodPressureSystolic", "bloodPressureDiastolic" -> {
@@ -536,48 +486,21 @@ class SamsungHealthManager(
                 (raw.fields["SYSTOLIC"] as? Number)?.let {
                     results.add(
                         UnifiedRecord(
-                            "${raw.uid}-sys",
-                            "BLOOD_PRESSURE_SYSTOLIC",
-                            startDate,
-                            endDate,
-                            zoneOffset,
-                            source,
-                            it.toDouble(),
-                            "mmHg",
-                            raw.uid,
-                            null
+                            "${raw.uid}-sys", "BLOOD_PRESSURE_SYSTOLIC", startDate, endDate, zoneOffset, source, it.toDouble(), "mmHg", raw.uid, null
                         )
                     )
                 }
                 (raw.fields["DIASTOLIC"] as? Number)?.let {
                     results.add(
                         UnifiedRecord(
-                            "${raw.uid}-dia",
-                            "BLOOD_PRESSURE_DIASTOLIC",
-                            startDate,
-                            endDate,
-                            zoneOffset,
-                            source,
-                            it.toDouble(),
-                            "mmHg",
-                            raw.uid,
-                            null
+                            "${raw.uid}-dia", "BLOOD_PRESSURE_DIASTOLIC", startDate, endDate, zoneOffset, source, it.toDouble(), "mmHg", raw.uid, null
                         )
                     )
                 }
                 (raw.fields["PULSE"] as? Number)?.let {
                     results.add(
                         UnifiedRecord(
-                            "${raw.uid}-pulse",
-                            "HEART_RATE",
-                            startDate,
-                            endDate,
-                            zoneOffset,
-                            source,
-                            it.toDouble(),
-                            "bpm",
-                            raw.uid,
-                            null
+                            "${raw.uid}-pulse", "HEART_RATE", startDate, endDate, zoneOffset, source, it.toDouble(), "bpm", raw.uid, null
                         )
                     )
                 }
@@ -587,16 +510,7 @@ class SamsungHealthManager(
                 val temp = (raw.fields["TEMPERATURE"] as? Number)?.toDouble() ?: return null
                 listOf(
                     UnifiedRecord(
-                        raw.uid,
-                        "BODY_TEMPERATURE",
-                        startDate,
-                        endDate,
-                        zoneOffset,
-                        source,
-                        temp,
-                        "°C",
-                        null,
-                        null
+                        raw.uid, "BODY_TEMPERATURE", startDate, endDate, zoneOffset, source, temp, "°C", null, null
                     )
                 )
             }
@@ -604,16 +518,7 @@ class SamsungHealthManager(
                 val floors = (raw.fields["FLOORS"] as? Number)?.toDouble() ?: return null
                 listOf(
                     UnifiedRecord(
-                        raw.uid,
-                        "FLOORS_CLIMBED",
-                        startDate,
-                        endDate,
-                        zoneOffset,
-                        source,
-                        floors,
-                        "count",
-                        null,
-                        null
+                        raw.uid, "FLOORS_CLIMBED", startDate, endDate, zoneOffset, source, floors, "count", null, null
                     )
                 )
             }
@@ -622,16 +527,7 @@ class SamsungHealthManager(
                 val vol = (raw.fields["VOLUME"] as? Number)?.toDouble() ?: return null
                 listOf(
                     UnifiedRecord(
-                        raw.uid,
-                        "HYDRATION",
-                        startDate,
-                        endDate,
-                        zoneOffset,
-                        source,
-                        vol,
-                        "mL",
-                        null,
-                        null
+                        raw.uid, "HYDRATION", startDate, endDate, zoneOffset, source, vol, "mL", null, null
                     )
                 )
             }
@@ -639,16 +535,7 @@ class SamsungHealthManager(
                 val cal = (raw.fields["TOTAL_CALORIES"] as? Number)?.toDouble() ?: return null
                 listOf(
                     UnifiedRecord(
-                        raw.uid,
-                        "ACTIVE_CALORIES_BURNED",
-                        startDate,
-                        endDate,
-                        zoneOffset,
-                        source,
-                        cal,
-                        "kcal",
-                        null,
-                        null
+                        raw.uid, "ACTIVE_CALORIES_BURNED", startDate, endDate, zoneOffset, source, cal, "kcal", null, null
                     )
                 )
             }
@@ -657,11 +544,7 @@ class SamsungHealthManager(
     }
 
     private fun convertBodyComposition(
-        raw: HealthDataRecord,
-        source: UnifiedSource,
-        startDate: String,
-        endDate: String,
-        zoneOffset: String?
+        raw: HealthDataRecord, source: UnifiedSource, startDate: String, endDate: String, zoneOffset: String?
     ): List<UnifiedRecord> {
         val results = mutableListOf<UnifiedRecord>()
         val parentId = raw.uid
@@ -669,128 +552,56 @@ class SamsungHealthManager(
         (raw.fields["WEIGHT"] as? Number)?.let {
             results.add(
                 UnifiedRecord(
-                    "$parentId-weight",
-                    "WEIGHT",
-                    startDate,
-                    endDate,
-                    zoneOffset,
-                    source,
-                    it.toDouble(),
-                    "kg",
-                    parentId,
-                    null
+                    "$parentId-weight", "WEIGHT", startDate, endDate, zoneOffset, source, it.toDouble(), "kg", parentId, null
                 )
             )
         }
         (raw.fields["HEIGHT"] as? Number)?.let {
             results.add(
                 UnifiedRecord(
-                    "$parentId-height",
-                    "HEIGHT",
-                    startDate,
-                    endDate,
-                    zoneOffset,
-                    source,
-                    it.toDouble() / 100.0,
-                    "m",
-                    parentId,
-                    null
+                    "$parentId-height", "HEIGHT", startDate, endDate, zoneOffset, source, it.toDouble() / 100.0, "m", parentId, null
                 )
             )
         }
         (raw.fields["BODY_FAT"] as? Number)?.let {
             results.add(
                 UnifiedRecord(
-                    "$parentId-bf",
-                    "BODY_FAT",
-                    startDate,
-                    endDate,
-                    zoneOffset,
-                    source,
-                    it.toDouble(),
-                    "%",
-                    parentId,
-                    null
+                    "$parentId-bf", "BODY_FAT", startDate, endDate, zoneOffset, source, it.toDouble(), "%", parentId, null
                 )
             )
         }
         (raw.fields["BODY_FAT_MASS"] as? Number)?.let {
             results.add(
                 UnifiedRecord(
-                    "$parentId-bfm",
-                    "BODY_FAT_MASS",
-                    startDate,
-                    endDate,
-                    zoneOffset,
-                    source,
-                    it.toDouble(),
-                    "kg",
-                    parentId,
-                    null
+                    "$parentId-bfm", "BODY_FAT_MASS", startDate, endDate, zoneOffset, source, it.toDouble(), "kg", parentId, null
                 )
             )
         }
         (raw.fields["FAT_FREE_MASS"] as? Number)?.let {
             results.add(
                 UnifiedRecord(
-                    "$parentId-ffm",
-                    "LEAN_BODY_MASS",
-                    startDate,
-                    endDate,
-                    zoneOffset,
-                    source,
-                    it.toDouble(),
-                    "kg",
-                    parentId,
-                    null
+                    "$parentId-ffm", "LEAN_BODY_MASS", startDate, endDate, zoneOffset, source, it.toDouble(), "kg", parentId, null
                 )
             )
         }
         (raw.fields["SKELETAL_MUSCLE_MASS"] as? Number)?.let {
             results.add(
                 UnifiedRecord(
-                    "$parentId-smm",
-                    "SKELETAL_MUSCLE_MASS",
-                    startDate,
-                    endDate,
-                    zoneOffset,
-                    source,
-                    it.toDouble(),
-                    "kg",
-                    parentId,
-                    null
+                    "$parentId-smm", "SKELETAL_MUSCLE_MASS", startDate, endDate, zoneOffset, source, it.toDouble(), "kg", parentId, null
                 )
             )
         }
         (raw.fields["BMI"] as? Number)?.let {
             results.add(
                 UnifiedRecord(
-                    "$parentId-bmi",
-                    "BMI",
-                    startDate,
-                    endDate,
-                    zoneOffset,
-                    source,
-                    it.toDouble(),
-                    "kg/m²",
-                    parentId,
-                    null
+                    "$parentId-bmi", "BMI", startDate, endDate, zoneOffset, source, it.toDouble(), "kg/m²", parentId, null
                 )
             )
         }
         (raw.fields["BASAL_METABOLIC_RATE"] as? Number)?.let {
             results.add(
                 UnifiedRecord(
-                    "$parentId-bmr",
-                    "BASAL_METABOLIC_RATE",
-                    startDate,
-                    endDate,
-                    zoneOffset,
-                    source,
-                    it.toDouble(),
-                    "kcal/day",
-                    parentId,
-                    null
+                    "$parentId-bmr", "BASAL_METABOLIC_RATE", startDate, endDate, zoneOffset, source, it.toDouble(), "kcal/day", parentId, null
                 )
             )
         }
@@ -802,7 +613,7 @@ class SamsungHealthManager(
     @Suppress("UNCHECKED_CAST")
     private fun convertWorkout(raw: HealthDataRecord): List<UnifiedWorkout>? {
         val source = buildUnifiedSource(raw) ?: return null
-        val zoneOffset = UnifiedTimestamp.zoneOffsetString()
+        val zoneOffset = raw.zoneOffset
         val exerciseType = raw.fields["EXERCISE_TYPE"]?.toString() ?: "UNKNOWN"
 
         val sessions = raw.fields["SESSIONS"] as? List<Map<String, Any?>> ?: emptyList()
@@ -872,13 +683,7 @@ class SamsungHealthManager(
     }
 
     private fun buildWorkoutFromRaw(
-        id: String,
-        parentId: String?,
-        raw: HealthDataRecord,
-        source: UnifiedSource,
-        zoneOffset: String?,
-        exerciseType: String,
-        fields: Map<String, Any?>
+        id: String, parentId: String?, raw: HealthDataRecord, source: UnifiedSource, zoneOffset: String?, exerciseType: String, fields: Map<String, Any?>
     ): UnifiedWorkout {
         val values = fields
             .filter { it.key != "SESSIONS" && it.key != "EXERCISE_TYPE" && it.key != "CUSTOM_TITLE" && it.value is Number }
@@ -920,16 +725,13 @@ class SamsungHealthManager(
     @Suppress("UNCHECKED_CAST")
     private fun convertSleep(raw: HealthDataRecord): List<UnifiedSleep>? {
         val source = buildUnifiedSource(raw) ?: return null
-        val zoneOffset = UnifiedTimestamp.zoneOffsetString()
+        val zoneOffset = raw.zoneOffset
         val sleepScore = raw.fields["SLEEP_SCORE"] as? Number
         val scoreValues = sleepScore?.let { listOf(mapOf("type" to "sleepScore", "value" to it, "unit" to "score")) }
 
-        logger("Sleep record ${raw.uid}: fields=${raw.fields.keys}")
-
         val sessions = raw.fields["SESSIONS"] as? List<Map<String, Any?>> ?: emptyList()
         if (sessions.isEmpty()) {
-            logger("Sleep record ${raw.uid}: no sessions, using top-level STAGE")
-            val stage = (raw.fields["STAGE"]?.toString() ?: "UNKNOWN").let { mapSamsungSleepStage(it) }
+            val stage = mapSamsungSleepStage((raw.fields["STAGE"]?.toString() ?: "UNKNOWN"))
             return listOf(
                 UnifiedSleep(
                     id = raw.uid,
@@ -951,7 +753,6 @@ class SamsungHealthManager(
             logger("  Session $sIdx keys: ${session.keys}")
             val stages = (session["sleepStages"] ?: session["stages"]) as? List<Map<String, Any?>>
             if (stages == null) {
-                logger("  Session $sIdx: no stages found, creating single entry")
                 val sessStart = (session["startTime"] as? Number)?.toLong() ?: raw.startTime
                 val sessEnd = (session["endTime"] as? Number)?.toLong() ?: raw.endTime ?: raw.startTime
                 results.add(
@@ -969,7 +770,7 @@ class SamsungHealthManager(
                 )
                 continue
             }
-            logger("  Session $sIdx: ${stages.size} stages")
+
             for ((stIdx, stageMap) in stages.withIndex()) {
                 val stageName = mapSamsungSleepStage(stageMap["stage"]?.toString() ?: "UNKNOWN")
                 val stStart = (stageMap["startTime"] as? Number)?.toLong()
@@ -1045,10 +846,7 @@ class SamsungHealthManager(
 
     @Suppress("UNCHECKED_CAST")
     private fun buildReadRequest(
-        dataType: DataType,
-        sinceTimestamp: Long? = null,
-        olderThanTimestamp: Long? = null,
-        limit: Int
+        dataType: DataType, sinceTimestamp: Long? = null, olderThanTimestamp: Long? = null, limit: Int
     ): ReadDataRequest<HealthDataPoint>? {
         val builder = getRequestBuilder(dataType, limit) ?: return null
         val builderClass = builder.javaClass
@@ -1104,38 +902,28 @@ class SamsungHealthManager(
                 .filter { !it.isInterface && it.simpleName != "Companion" }
                 .distinctBy { it.simpleName }
 
-            for (bc in builderClasses) {
-                for (c in bc.constructors) {
-                    logger("[buildReadRequest] ${bc.simpleName} constructor: (${
-                        c.parameterTypes.joinToString(", ") { it.simpleName }
-                    })")
-                }
-                for (m in bc.declaredMethods) {
-                    logger("[buildReadRequest] ${bc.simpleName}.${m.name}(${
-                        m.parameterTypes.joinToString(", ") { it.simpleName }
-                    }) -> ${m.returnType.simpleName}")
+            val localDateBuilder = builderClasses.find { it.simpleName == "LocalDateBuilder" }
+            if (localDateBuilder != null) {
+                val constructor = localDateBuilder.constructors.firstOrNull()
+                if (constructor != null) {
+                    constructor.isAccessible = true
+                    val paramTypes = constructor.parameterTypes
+                    val args = paramTypes.map { pType ->
+                        when {
+                            DataType::class.java.isAssignableFrom(pType) -> dataType
+                            pType == Int::class.java || pType == Integer::class.java -> limit
+                            pType == Ordering::class.java -> Ordering.ASC
+                            else -> null
+                        }
+                    }.toTypedArray()
+                    return constructor.newInstance(*args)
                 }
             }
 
-            val constructor = builderClasses.find { it.simpleName == "LocalDateBuilder" }
-                ?.constructors?.firstOrNull() ?: return null
-            constructor.isAccessible = true
-            val paramTypes = constructor.parameterTypes
-            logger("[buildReadRequest] Trying LocalDateBuilder with ${paramTypes.size} params: ${paramTypes.map { it.simpleName }}")
-            val args = paramTypes.map { pType ->
-                when {
-                    DataType::class.java.isAssignableFrom(pType) -> dataType
-                    pType == Int::class.java || pType == Integer::class.java -> limit
-                    pType == Ordering::class.java -> Ordering.ASC
-                    else -> null
-                }
-            }.toTypedArray()
-            logger("[buildReadRequest] Constructed args: ${args.map { it?.javaClass?.simpleName ?: "null" }}")
-            val builder = constructor.newInstance(*args)
-            logger("[buildReadRequest] Got builder via LocalDateBuilder")
-            return builder
+            logger("Could not create request builder for ${dataType.javaClass.simpleName}")
+            null
         } catch (e: Exception) {
-            logger("[buildReadRequest] Fallback FAILED: ${e.javaClass.simpleName}: ${e.message}")
+            logger("Failed to create request builder: ${e.javaClass.simpleName}: ${e.message}")
             null
         }
     }
@@ -1147,6 +935,7 @@ class SamsungHealthManager(
                 dataType = getDataTypeName(typeId),
                 startTime = dataPoint.startTime.toEpochMilli(),
                 endTime = dataPoint.endTime?.toEpochMilli(),
+                zoneOffset = dataPoint.zoneOffset?.toString(),
                 dataSource = dataPoint.dataSource?.let { RawDataSource(it.appId, it.deviceId) },
                 device = getDeviceInfo(dataPoint.dataSource),
                 fields = extractFieldsForType(typeId, dataPoint)
@@ -1247,19 +1036,15 @@ class SamsungHealthManager(
     }
 
     private fun extractStepsFields(dp: HealthDataPoint): Map<String, Any?> {
-        val f = mutableMapOf<String, Any?>()
+        val fields = mutableMapOf<String, Any?>()
         val totalLong = getFieldValue<Long>(DataTypes.STEPS, "TOTAL", dp)
-        val totalInt = getFieldValue<Int>(DataTypes.STEPS, "TOTAL", dp)
-        val totalFloat = getFieldValue<Float>(DataTypes.STEPS, "TOTAL", dp)
         val totalAny = getFieldValue<Any>(DataTypes.STEPS, "TOTAL", dp)
-        logger("[steps] extractStepsFields: TOTAL as Long=$totalLong, Int=$totalInt, Float=$totalFloat, Any=$totalAny (type=${totalAny?.javaClass?.simpleName})")
         if (totalLong != null) {
-            f["TOTAL"] = totalLong
+            fields["TOTAL"] = totalLong
         } else if (totalAny is Number) {
-            logger("[steps] TOTAL fallback via Number: ${totalAny.toLong()}")
-            f["TOTAL"] = totalAny.toLong()
+            fields["TOTAL"] = totalAny.toLong()
         }
-        return f
+        return fields
     }
 
     private fun extractBloodOxygenFields(dp: HealthDataPoint): Map<String, Any?> {
@@ -1316,56 +1101,7 @@ class SamsungHealthManager(
         return f
     }
 
-    @Suppress("UNCHECKED_CAST")
-    private fun extractExerciseFields(dp: HealthDataPoint): Map<String, Any?> {
-        val f = mutableMapOf<String, Any?>()
-        getFieldValue<Any>(DataTypes.EXERCISE, "EXERCISE_TYPE", dp)?.let { f["EXERCISE_TYPE"] = if (it is Enum<*>) it.name else it.toString() }
-        getFieldValue<Float>(DataTypes.EXERCISE, "TOTAL_CALORIES", dp)?.let { f["TOTAL_CALORIES"] = it }
-        getFieldValue<Long>(DataTypes.EXERCISE, "TOTAL_DURATION", dp)?.let { f["TOTAL_DURATION"] = it }
-        getFieldValue<String>(DataTypes.EXERCISE, "CUSTOM_TITLE", dp)?.let { f["CUSTOM_TITLE"] = it }
-        getFieldValue<List<*>>(DataTypes.EXERCISE, "SESSIONS", dp)?.let { sessions ->
-            f["SESSIONS"] = sessions.mapNotNull { extractSession(it) }
-        }
-        return f
-    }
-
-    private fun extractSession(session: Any?): Map<String, Any?>? {
-        if (session == null) return null
-        val data = mutableMapOf<String, Any?>()
-        try {
-            session.javaClass.methods
-                .filter { it.parameterCount == 0 && it.name.startsWith("get") && it.name != "getClass" }
-                .forEach { method ->
-                    try {
-                        val value = method.invoke(session) ?: return@forEach
-                        val key = method.name.removePrefix("get").let { it.first().lowercase() + it.drop(1) }
-                        when (value) {
-                            is Number -> data[key] = value
-                            is String -> if (value.isNotEmpty()) data[key] = value
-                            is Boolean -> data[key] = value
-                            is Enum<*> -> data[key] = value.name
-                            is Instant -> data[key] = value.toEpochMilli()
-                            is Duration -> data[key] = value.toMillis()
-                        }
-                    } catch (_: Exception) {}
-                }
-        } catch (_: Exception) {}
-        return data.ifEmpty { null }
-    }
-
-    @Suppress("UNCHECKED_CAST")
-    private fun extractSleepFields(dp: HealthDataPoint): Map<String, Any?> {
-        val f = mutableMapOf<String, Any?>()
-        getFieldValue<Any>(DataTypes.SLEEP, "STAGE", dp)?.let { f["STAGE"] = if (it is Enum<*>) it.name else it.toString() }
-        getFieldValue<Float>(DataTypes.SLEEP, "EFFICIENCY", dp)?.let { f["EFFICIENCY"] = it }
-        getFieldValue<Int>(DataTypes.SLEEP, "SLEEP_SCORE", dp)?.let { f["SLEEP_SCORE"] = it }
-        getFieldValue<List<*>>(DataTypes.SLEEP, "SESSIONS", dp)?.let { sessions ->
-            f["SESSIONS"] = sessions.mapNotNull { extractSleepSession(it) }
-        }
-        return f
-    }
-
-    private fun extractSleepSession(session: Any?): Map<String, Any?>? {
+    private fun extractSleepSessionFields(session: Any?): Map<String, Any?>? {
         if (session == null) return null
         val data = mutableMapOf<String, Any?>()
         try {
@@ -1383,7 +1119,7 @@ class SamsungHealthManager(
                             is Instant -> data[key] = value.toEpochMilli()
                             is Duration -> data[key] = value.toMillis()
                             is List<*> -> {
-                                val stages = value.mapNotNull { extractSleepStage(it) }
+                                val stages = value.mapNotNull { extractObjectFields(it) }
                                 if (stages.isNotEmpty()) data[key] = stages
                             }
                         }
@@ -1393,18 +1129,49 @@ class SamsungHealthManager(
         return data.ifEmpty { null }
     }
 
-    private fun extractSleepStage(stage: Any?): Map<String, Any?>? {
-        if (stage == null) return null
+    @Suppress("UNCHECKED_CAST")
+    private fun extractExerciseFields(dp: HealthDataPoint): Map<String, Any?> {
+        val fields = mutableMapOf<String, Any?>()
+        getFieldValue<Any>(DataTypes.EXERCISE, "EXERCISE_TYPE", dp)?.let { fields["EXERCISE_TYPE"] = if (it is Enum<*>) it.name else it.toString() }
+        getFieldValue<Float>(DataTypes.EXERCISE, "TOTAL_CALORIES", dp)?.let { fields["TOTAL_CALORIES"] = it }
+        getFieldValue<Long>(DataTypes.EXERCISE, "TOTAL_DURATION", dp)?.let { fields["TOTAL_DURATION"] = it }
+        getFieldValue<String>(DataTypes.EXERCISE, "CUSTOM_TITLE", dp)?.let { fields["CUSTOM_TITLE"] = it }
+        getFieldValue<List<*>>(DataTypes.EXERCISE, "SESSIONS", dp)?.let { sessions ->
+            fields["SESSIONS"] = sessions.mapNotNull { extractSleepSessionFields(it) }
+        }
+        return fields
+    }
+
+    @Suppress("UNCHECKED_CAST")
+    private fun extractSleepFields(dp: HealthDataPoint): Map<String, Any?> {
+        val f = mutableMapOf<String, Any?>()
+        getFieldValue<Any>(DataTypes.SLEEP, "STAGE", dp)?.let { f["STAGE"] = if (it is Enum<*>) it.name else it.toString() }
+        getFieldValue<Float>(DataTypes.SLEEP, "EFFICIENCY", dp)?.let { f["EFFICIENCY"] = it }
+        getFieldValue<Int>(DataTypes.SLEEP, "SLEEP_SCORE", dp)?.let { f["SLEEP_SCORE"] = it }
+        getFieldValue<List<*>>(DataTypes.SLEEP, "SESSIONS", dp)?.let { sessions ->
+            f["SESSIONS"] = sessions.mapNotNull { extractSleepSessionFields(it) }
+        }
+        return f
+    }
+
+    /**
+     * Generic getter-based extraction for Samsung SDK objects.
+     * Consolidates the previously duplicated extractSession/extractSleepSession/extractSleepStage methods.
+     */
+    private fun extractObjectFields(obj: Any?): Map<String, Any?>? {
+        if (obj == null) return null
         val data = mutableMapOf<String, Any?>()
         try {
-            stage.javaClass.methods
+            obj.javaClass.methods
                 .filter { it.parameterCount == 0 && it.name.startsWith("get") && it.name != "getClass" }
                 .forEach { method ->
                     try {
-                        val value = method.invoke(stage) ?: return@forEach
+                        val value = method.invoke(obj) ?: return@forEach
                         val key = method.name.removePrefix("get").let { it.first().lowercase() + it.drop(1) }
                         when (value) {
                             is Number -> data[key] = value
+                            is String -> if (value.isNotEmpty()) data[key] = value
+                            is Boolean -> data[key] = value
                             is Enum<*> -> data[key] = value.name
                             is Instant -> data[key] = value.toEpochMilli()
                             is Duration -> data[key] = value.toMillis()

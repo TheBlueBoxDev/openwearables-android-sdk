@@ -2,25 +2,48 @@ package com.openwearables.health.sdk.managers
 
 import android.content.Context
 import android.content.Intent
+import android.util.Log
 import androidx.core.os.bundleOf
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.permission.HealthPermission
-import androidx.health.connect.client.records.*
+import androidx.health.connect.client.records.ActiveCaloriesBurnedRecord
+import androidx.health.connect.client.records.BasalMetabolicRateRecord
+import androidx.health.connect.client.records.BloodGlucoseRecord
+import androidx.health.connect.client.records.BloodPressureRecord
+import androidx.health.connect.client.records.BodyFatRecord
+import androidx.health.connect.client.records.BodyTemperatureRecord
+import androidx.health.connect.client.records.DistanceRecord
+import androidx.health.connect.client.records.ExerciseSessionRecord
+import androidx.health.connect.client.records.FloorsClimbedRecord
+import androidx.health.connect.client.records.HeartRateRecord
+import androidx.health.connect.client.records.HeartRateVariabilityRmssdRecord
+import androidx.health.connect.client.records.HeightRecord
+import androidx.health.connect.client.records.HydrationRecord
+import androidx.health.connect.client.records.LeanBodyMassRecord
+import androidx.health.connect.client.records.OxygenSaturationRecord
+import androidx.health.connect.client.records.Record
+import androidx.health.connect.client.records.RespiratoryRateRecord
+import androidx.health.connect.client.records.RestingHeartRateRecord
+import androidx.health.connect.client.records.SleepSessionRecord
+import androidx.health.connect.client.records.StepsRecord
+import androidx.health.connect.client.records.Vo2MaxRecord
+import androidx.health.connect.client.records.WeightRecord
 import androidx.health.connect.client.request.ReadRecordsRequest
 import androidx.health.connect.client.time.TimeRangeFilter
-import com.openwearables.health.sdk.ProviderDisplayNames
-import com.openwearables.health.sdk.ProviderIds
-import com.openwearables.health.sdk.interfaces.HealthDataProvider
+import com.openwearables.health.sdk.data.ProviderDisplayNames
+import com.openwearables.health.sdk.data.ProviderIds
 import com.openwearables.health.sdk.data.entities.ProviderReadResult
 import com.openwearables.health.sdk.data.entities.UnifiedHealthData
+import com.openwearables.health.sdk.data.utlis.DispatcherProvider
+import com.openwearables.health.sdk.interfaces.HealthDataProvider
 import com.openwearables.health.sdk.managers.extensions.mapToProvider
-import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.time.Instant
 import kotlin.reflect.KClass
 
 class HealthConnectManager(
     private val context: Context,
+    private val dispatchers: DispatcherProvider,
     private val logger: (String) -> Unit
 ) : HealthDataProvider {
 
@@ -89,9 +112,9 @@ class HealthConnectManager(
         sinceTimestamp: Long? = null,
         olderThanTimestamp: Long? = null,
         limit: Int
-    ): ProviderReadResult = withContext(Dispatchers.IO) {
+    ): ProviderReadResult = withContext(dispatchers.io) {
         if (!::client.isInitialized) {
-            val isConnected = withContext(Dispatchers.Main) { connect() }
+            val isConnected = withContext(dispatchers.main) { connect() }
             if (!isConnected) return@withContext ProviderReadResult(UnifiedHealthData(), null)
         }
 
@@ -130,6 +153,10 @@ class HealthConnectManager(
             ProviderReadResult(UnifiedHealthData(), null)
         }
     }
+
+    // -----------------------------------------------------------------------
+    // Unified read methods (deduplicated)
+    // -----------------------------------------------------------------------
 
     override suspend fun readData(
         typeId: String,
@@ -315,8 +342,15 @@ class HealthConnectManager(
     }
 
     companion object {
+        const val TAG = "HealthConnectManager"
+
         fun isAvailable(context: Context): Boolean {
-            return HealthConnectClient.getSdkStatus(context) == HealthConnectClient.SDK_AVAILABLE
+            return try {
+                return HealthConnectClient.getSdkStatus(context) == HealthConnectClient.SDK_AVAILABLE
+            } catch (e: Exception) {
+                Log.d(TAG, "Health Connect availability check failed: ${e.javaClass.simpleName}: ${e.message}")
+                false
+            }
         }
     }
 }

@@ -7,7 +7,7 @@ import com.openwearables.health.sdk.data.entities.UnifiedHealthData
  * Abstraction over health data sources (Samsung Health, Health Connect).
  *
  * Each implementation reads provider-specific data and converts it
- * to the [com.openwearables.health.sdk.data.entities.UnifiedHealthData] format before returning. The [SyncManager]
+ * to the [com.openwearables.health.sdk.data.entities.UnifiedHealthData] format before returning. The [com.openwearables.health.sdk.managers.SyncStateManager]
  * works exclusively through this interface and never touches raw
  * provider-specific types.
  */

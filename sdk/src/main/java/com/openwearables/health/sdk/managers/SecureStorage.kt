@@ -6,8 +6,9 @@ import android.util.Log
 import androidx.core.content.edit
 import androidx.security.crypto.EncryptedSharedPreferences
 import androidx.security.crypto.MasterKey
-import com.openwearables.health.sdk.ProviderIds
-import com.openwearables.health.sdk.StorageKeys
+import com.openwearables.health.sdk.data.NotificationConfig
+import com.openwearables.health.sdk.data.ProviderIds
+import com.openwearables.health.sdk.data.StorageKeys
 import java.security.KeyStore
 
 class SecureStorage(val context: Context) {
@@ -80,9 +81,22 @@ class SecureStorage(val context: Context) {
         context.getSharedPreferences(StorageKeys.SYNC_PREFS_NAME, Context.MODE_PRIVATE)
     }
 
+    // MARK: - Sync Days Back
+    var syncDaysBack: Int
+        get() = configPrefs.getInt(KEY_SYNC_DAYS_BACK, 0)
+        set(value) { configPrefs.edit { putInt(KEY_SYNC_DAYS_BACK, value) } }
+
     var provider: String
         get() = configPrefs.getString(KEY_HEALTH_PROVIDER, ProviderIds.GOOGLE) ?: ProviderIds.GOOGLE
         set(value) { configPrefs.edit { putString(KEY_HEALTH_PROVIDER, value) } }
+
+    var notificationTitle: String
+        get() = configPrefs.getString(KEY_NOTIFICATION_TITLE, null) ?: NotificationConfig.CHANNEL_NAME
+        set(value) { configPrefs.edit { putString(KEY_NOTIFICATION_TITLE, value) } }
+
+    var notificationText: String
+        get() = configPrefs.getString(KEY_NOTIFICATION_TEXT, null) ?: NotificationConfig.DEFAULT_TEXT
+        set(value: String) { configPrefs.edit { putString(KEY_NOTIFICATION_TEXT, value) } }
 
     var host: String
         get() = configPrefs.getString(KEY_HOST, "") ?: ""
@@ -168,7 +182,7 @@ class SecureStorage(val context: Context) {
     }
 
     fun hasSession(): Boolean {
-        val userId = userId ?: return false
+        userId ?: return false
         return accessToken != null || apiKey != null
     }
 
@@ -181,6 +195,7 @@ class SecureStorage(val context: Context) {
             remove(KEY_SYNC_ACTIVE)
             remove(KEY_TRACKED_TYPES)
             remove(KEY_HEALTH_PROVIDER)
+            putBoolean(KEY_APP_INSTALLED, true)
         }
     }
 
@@ -202,5 +217,8 @@ class SecureStorage(val context: Context) {
         private const val KEY_TRACKED_TYPES = "trackedTypes"
         private const val KEY_HEALTH_PROVIDER = "healthProvider"
         private const val KEY_APP_INSTALLED = "appInstalled"
+        private const val KEY_SYNC_DAYS_BACK = "syncDaysBack"
+        private const val KEY_NOTIFICATION_TITLE = "notificationTitle"
+        private const val KEY_NOTIFICATION_TEXT = "notificationText"
     }
 }
